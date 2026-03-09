@@ -4,7 +4,7 @@ import copy
 import inspect
 import random
 import numpy as np
-sys.path.append("C:/Users/20183272/OneDrive - TU Eindhoven/Documents/GitHub/gympn")
+sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance/gympn")
 import torch
 
 from gympn.solvers import BaseSolver
@@ -22,7 +22,7 @@ class PolicyConformance(GymProblem):
     3. The loss of rewards between the two policies from the same state.
     """
 
-    def __init__(self, gym_problem, heuristic_solver, gym_solver, state_variables):
+    def __init__(self, gym_problem, heuristic_solver, gym_solver, state_variables, excluded_token_attrs=None):
         super().__init__()
         # Initialize the heuristic and gym solvers
         self.heuristic_solver = heuristic_solver
@@ -34,6 +34,12 @@ class PolicyConformance(GymProblem):
 
         # Initialize the state variables
         self.state_variables = state_variables
+
+        # Token attributes to exclude when building binding keys for action
+        # comparison.  Two bindings that differ only in excluded attributes
+        # are treated as the same action.
+        # Format: set of attribute names, e.g. {"chip_id", "case_id"}
+        self.excluded_token_attrs = set(excluded_token_attrs) if excluded_token_attrs else set()
 
         # Observation-level dictionaries
         self.states_in_observation = {} # Which states are recorded in each observation 
@@ -179,7 +185,7 @@ class PolicyConformance(GymProblem):
 
                 # Record the action taken by the first solver (skip if step returned None, i.e. clock exceeded length)
                 if timed_binding is not None:
-                    action_1 = str(timed_binding[2])
+                    action_1 = self._binding_key(timed_binding)
                     state_key = tuple(state_variables)
                     if state_key not in self.p1_state_action_mapping:
                         self.p1_state_action_mapping[state_key] = {action_1: 1}
@@ -194,10 +200,46 @@ class PolicyConformance(GymProblem):
                     else:
                         self.states_in_observation[state_key].append(copy.deepcopy(gym_problem))
 
+    def _binding_key(self, binding):
+        """
+        Build a hashable key that identifies a binding by its action name
+        AND the tokens it consumes, so that two bindings of the same action
+        but different resource/task choices are distinguished.
+
+        Token attributes listed in ``self.excluded_token_attrs`` are stripped
+        from the key so that bindings differing only in those attributes
+        are treated as the same action.
+
+        Handles multiple binding formats:
+          - From bindings():            ([(place, token), ...], time, transition)
+          - From get_graph_observation: ([(place, token), ...], time, transition)
+          - Postpone pseudo-binding:    (['postpone'], time, None)
+        """
+        transition_name = str(binding[2])
+        token_parts = []
+        for item in binding[0]:
+            if isinstance(item, (tuple, list)):
+                # (place, token) pair — extract the token value
+                raw = item[-1].value if hasattr(item[-1], 'value') else item[-1]
+            elif hasattr(item, 'value'):
+                # bare token
+                raw = item.value
+            else:
+                # string like 'postpone' or other primitive
+                raw = item
+
+            # Strip excluded attributes from dict-valued tokens
+            if isinstance(raw, dict) and self.excluded_token_attrs:
+                raw = {k: v for k, v in raw.items() if k not in self.excluded_token_attrs}
+
+            token_parts.append(str(raw))
+        return transition_name + "|" + ";".join(token_parts)
+
     def _get_solver_action(self, state, solver):
         """
         Query the action a solver would take from the given state without executing it.
-        Returns the action name (binding[2]), or None for postpone.
+        Returns a hashable key that captures the full binding (action + tokens),
+        or None for postpone.
         """
         bindings, _ = state.bindings()
         if not bindings or not state.network_tag.is_action():
@@ -214,7 +256,7 @@ class PolicyConformance(GymProblem):
             binding = solver.solve(obs, aug_bindings)
             if binding == "postpone":
                 return None
-        return binding[2]
+        return self._binding_key(binding)
 
     def expected_reward_run(self, solver_1, solver_2, tau, gamma, num_rollouts, num_steps):
         """
