@@ -14,8 +14,8 @@ import copy
 import numpy as np
 import torch
 
-sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance/gympn")
-sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance")
+sys.path.append("C:/Users/20183272/OneDrive - TU Eindhoven/Documents/GitHub/gympn")
+#sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance")
 
 from gympn.solvers import GymSolver, RandomSolver
 from gympn_problem_from_json import load_parameters, create_task_assignment_problem

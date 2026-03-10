@@ -3,7 +3,7 @@ import sys
 import copy
 import numpy as np
 import random
-sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance/gympn")
+sys.path.append("C:/Users/20183272/OneDrive - TU Eindhoven/Documents/GitHub/gympn")
 
 import torch
 from gympn.networks import HeteroActor
@@ -140,11 +140,11 @@ test = False
 visualize = False
 conformance_analysis = True
 
-w_p = "C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance/data/train/2026-03-07-16-54-24_run/best_policy.pth"
+w_p = "C:/Users/20183272/OneDrive - TU Eindhoven/Documents/PhD IS/Papers/Policy conformance analysis/data/train/2026-03-09-17-01-54_run/best_policy.pth"
 
 if train:
     print("Training the model...")
-    assembly_system.training_run(length=100, args_dict={"open_tensorboard": False, "verbose": True})
+    assembly_system.training_run(length=100, args_dict={"open_tensorboard": True, "verbose": True})
     print("Model trained successfully")
 
 if test:

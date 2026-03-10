@@ -217,6 +217,10 @@ class PolicyConformance(GymProblem):
         """
         transition_name = str(binding[2])
         token_parts = []
+        
+        if binding[2] is None:
+            return "postpone"
+        
         for item in binding[0]:
             if isinstance(item, (tuple, list)):
                 # (place, token) pair — extract the token value
@@ -255,7 +259,7 @@ class PolicyConformance(GymProblem):
             aug_bindings = state._augment_bindings_with_postpone(bindings)
             binding = solver.solve(obs, aug_bindings)
             if binding == "postpone":
-                return None
+                return "postpone"
         return self._binding_key(binding)
 
     def expected_reward_run(self, solver_1, solver_2, tau, gamma, num_rollouts, num_steps):
