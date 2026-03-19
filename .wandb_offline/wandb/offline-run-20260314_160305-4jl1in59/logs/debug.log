@@ -1,0 +1,49 @@
+2026-03-14 16:03:05,390 INFO    MainThread:33368 [wandb_setup.py:_flush():81] Current SDK version is 0.24.0
+2026-03-14 16:03:05,390 INFO    MainThread:33368 [wandb_setup.py:_flush():81] Configure stats pid to 33368
+2026-03-14 16:03:05,390 INFO    MainThread:33368 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-03-14 16:03:05,391 INFO    MainThread:33368 [wandb_init.py:setup_run_log_directory():717] Logging user logs to .wandb_offline\wandb\offline-run-20260314_160305-4jl1in59\logs\debug.log
+2026-03-14 16:03:05,391 INFO    MainThread:33368 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to .wandb_offline\wandb\offline-run-20260314_160305-4jl1in59\logs\debug-internal.log
+2026-03-14 16:03:05,391 INFO    MainThread:33368 [wandb_init.py:init():844] calling init triggers
+2026-03-14 16:03:05,391 INFO    MainThread:33368 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'algorithm': 'ppo-clip', 'episodes': 20, 'epochs': 20, 'batch_size': 64, 'policy_lr': 0.003, 'value_lr': 0.003, 'gam': 1, 'lam': 0.99, 'eps': 0.2, 'vf_coeff': 0.5, 'causal_rl': False, '_wandb': {}}
+2026-03-14 16:03:05,391 INFO    MainThread:33368 [wandb_init.py:init():892] starting backend
+2026-03-14 16:03:07,721 INFO    MainThread:33368 [wandb_init.py:init():895] sending inform_init request
+2026-03-14 16:03:07,766 INFO    MainThread:33368 [wandb_init.py:init():903] backend started and connected
+2026-03-14 16:03:07,789 INFO    MainThread:33368 [wandb_init.py:init():973] updated telemetry
+2026-03-14 16:03:07,859 INFO    MainThread:33368 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-03-14 16:03:14,136 WARNING MainThread:33368 [wandb_init.py:init():1589] [no run ID] interrupted
+Traceback (most recent call last):
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\site-packages\wandb\sdk\wandb_init.py", line 1580, in init
+    run = wi.init(run_settings, run_config, run_printer)
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\site-packages\wandb\sdk\wandb_init.py", line 1008, in init
+    result = wait_with_progress(
+        run_init_handle,
+    ...<5 lines>...
+        ),
+    )
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\site-packages\wandb\sdk\mailbox\wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+           ~~~~~~~~~~~~~~~~~~~~~~^
+        [handle],
+        ^^^^^^^^^
+        timeout=timeout,
+        ^^^^^^^^^^^^^^^^
+        display_progress=display_progress,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )[0]
+    ^
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\site-packages\wandb\sdk\mailbox\wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\site-packages\wandb\sdk\lib\asyncio_manager.py", line 136, in run
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\concurrent\futures\_base.py", line 451, in result
+    self._condition.wait(timeout)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\20183272\AppData\Local\Programs\Python\Python313\Lib\threading.py", line 359, in wait
+    waiter.acquire()
+    ~~~~~~~~~~~~~~^^
+KeyboardInterrupt
+2026-03-14 16:03:14,290 INFO    wandb-AsyncioManager-main:33368 [service_client.py:_forward_responses():80] Reached EOF.
+2026-03-14 16:03:14,290 INFO    wandb-AsyncioManager-main:33368 [mailbox.py:close():137] Closing mailbox, abandoning 0 handles.
