@@ -3,8 +3,10 @@ Trains a PPO agent on a task assignment problem created from BPI Challenge 2012 
 Uses functions from gympn_problem_from_json.py to create the GymPN problem.
 """
 
-import sys
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import sys
 import copy
 import warnings
 import signal
@@ -40,6 +42,13 @@ if __name__ == "__main__":
     visualize_heuristic = False  # Set to True to visualize the heuristic solver
     visualize_ppo = True  # Set to True to visualize the PPO solver
 
+    # Problem simplification: filter resources to reduce complexity
+    min_resource_activities = 2   # Only keep resources used in >= N activities (must be <= max_activities!)
+    max_resources = None             # Cap on total resources (None=no cap)
+    max_activities = None            # Cap on total activities (None=no cap, most reachable first)
+    remove_self_loops = True      # Remove self-loop transitions (prevents cases looping on same activity)
+    arrival_rate_factor = 0.1     # >1 = lighter load (fewer arrivals), <1 = heavier. None = auto (~67% utilization)
+
     # Path to save/load the trained model (separate dirs for each problem variant)
     variant = "disjoint" if disjoint_actions else "joint"
     model_save_dir = f"data/train/bpi_2012_ppo_{variant}"
@@ -57,63 +66,83 @@ if __name__ == "__main__":
     print(f"[DEBUG] - Loaded {len(parameters['resources'])} resources", flush=True)
 
     print("[DEBUG] Step 2: Creating GymProblem...", flush=True)
+    print(f"[DEBUG] - Resource filter: min_activities={min_resource_activities}, max={max_resources}", flush=True)
+    print(f"[DEBUG] - Activity filter: max_activities={max_activities}", flush=True)
+    print(f"[DEBUG] - Remove self-loops: {remove_self_loops}", flush=True)
+    print(f"[DEBUG] - Arrival rate factor: {arrival_rate_factor}", flush=True)
     if disjoint_actions:
-        problem = create_disjoint_task_assignment_problem(parameters)
+        problem = create_disjoint_task_assignment_problem(
+            parameters,
+            min_resource_activities=min_resource_activities,
+            max_resources=max_resources,
+            max_activities=max_activities,
+            remove_self_loops=remove_self_loops,
+            arrival_rate_factor=arrival_rate_factor)
     else:
-        problem = create_task_assignment_problem(parameters)
+        problem = create_task_assignment_problem(
+            parameters,
+            min_resource_activities=min_resource_activities,
+            max_resources=max_resources,
+            max_activities=max_activities,
+            remove_self_loops=remove_self_loops,
+            arrival_rate_factor=arrival_rate_factor)
+
+    #set unobservable attributes
+    problem.set_unobservable(
+        simvars=['arrival', 'done']
+    )
+
     print("[DEBUG] GymProblem created successfully", flush=True)
 
 
     ###########################################################################
     # Default training arguments (customize as needed)
+    # Training defaults (sample-efficient)
     default_args = {
-        # Algorithm Parameters
         "algorithm": "ppo-clip",
-        "gam": 1.0,  # With finite horizon, use gam=1
-        "lam": 0.99,
-        "eps": 0.3,
-        "c": 0.2,
-        "ent_bonus": 0.0,
-        "agent_seed": 42,  # Fixed seed for reproducibility
+        "gam": 0.99,
+        "lam": 0.97,
+        "eps": 0.1,
+        "c": 0.5,
+        # entropy bonus: modest exploration
+        "ent_bonus": 0.01,
+        "agent_seed": 42,
 
-        # Policy Model
         "policy_model": "gnn",
-        "policy_kwargs": {"hidden_layers": [32]},  # Reduced hidden layer size
+        "policy_kwargs": {"hidden_layers": [32]},
+        # Policy LR: conservative default
         "policy_lr": 3e-4,
-        "policy_updates": 1,  # Reduced from 2
-        "policy_kld_limit": 0.01,
-        "policy_weights": "",
-        "policy_network": "",
-        "score": False,
-        "score_weight": 1e-3,
+        # Increase policy updates per epoch for more effective policy learning
+        "policy_updates": 4,
+        # Tighter KLD limit to avoid large per-batch policy shifts
+        "policy_kld_limit": 0.05,
 
-        # Value Model
         "value_model": "gnn",
-        "value_kwargs": {"hidden_layers": [32]},  # Reduced hidden layer size
-        "value_lr": 3e-4,
-        "value_updates": 5,  # Reduced from 10
-        "value_weights": "",
+        "value_kwargs": {"hidden_layers": [32]},
+        "value_lr": 1e-4,
+        # More value updates but reduce value loss weight so it doesn't dominate
+        "value_updates": 10,
+        "vf_coeff": 0.005,
 
-        # Training Parameters
-        "episodes": 5,  # Reduced from 5 for faster testing
-        "epochs": 100,  # Reduced from 50 for faster testing
-        "max_episode_length": 100,  # Add max episode length to prevent infinite loops
-        "batch_size": 32,  # Reduced from 64
+        # Larger on-policy data per epoch and longer training to allow convergence
+        "episodes": 10,
+        "epochs": 50,
+        "max_episode_length": None,
+        "batch_size": 64,
         "sort_states": False,
         "use_gpu": False,
         "load_policy_network": False,
         "verbose": 1,
 
-        # Saving Parameters
         "name": f"bpi_2012_ppo_{variant}",
         "datetag": False,
         "logdir": "data/train",
-        "save_freq": 1,
+        "save_freq": 5,
         "open_tensorboard": False,
 
-        # Wandb Parameters
         "use_wandb": False,
     }
+
 
     ###########################################################################
 
@@ -142,7 +171,7 @@ if __name__ == "__main__":
             if hasattr(signal, 'SIGALRM'):
                 signal.alarm(1800)
 
-            problem.training_run(length=50, args_dict=default_args)
+            problem.training_run(length=10, args_dict=default_args)
 
             # Cancel alarm if training completes
             if hasattr(signal, 'SIGALRM'):
@@ -176,7 +205,7 @@ if __name__ == "__main__":
             for i in range(5):
                 print(f"[DEBUG] - Random run {i+1}/5...")
                 frozen_problem = copy.deepcopy(problem)
-                res = frozen_problem.testing_run(length=50, solver=RandomSolver())
+                res = frozen_problem.testing_run(length=100, solver=RandomSolver())
                 random_rewards.append(res)
                 print(f"  Run {i+1}: Reward = {res}")
 
@@ -198,7 +227,7 @@ if __name__ == "__main__":
                 print(f"[DEBUG] - Heuristic run {i+1}/5...")
                 frozen_problem = copy.deepcopy(problem)
                 solver = HeuristicSolver(heuristic_solver_function)
-                res = frozen_problem.testing_run(length=50, solver=solver)
+                res = frozen_problem.testing_run(length=100, solver=solver)
                 heuristic_rewards.append(res)
                 print(f"  Run {i+1}: Reward = {res}")
 
@@ -224,7 +253,7 @@ if __name__ == "__main__":
                     print(f"[DEBUG] - PPO run {i+1}/5...")
                     frozen_problem = copy.deepcopy(problem)
                     solver = GymSolver(weights_path=weights_path, metadata=problem.make_metadata())
-                    res = frozen_problem.testing_run(length=50, solver=solver)
+                    res = frozen_problem.testing_run(length=100, solver=solver)
                     ppo_rewards.append(res)
                     print(f"  Run {i+1}: Reward = {res}")
 

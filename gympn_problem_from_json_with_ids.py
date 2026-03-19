@@ -319,9 +319,22 @@ def create_task_assignment_problem(parameters, time_scale=None,
     elif time_scale is None:
         time_scale = 1.0
 
-    scaled_inter_arrival = max(0.01, (avg_inter_arrival_time * 3600) / time_scale)
+    # Apply optional arrival_rate_factor: values >1 increase inter-arrival
+    # time (lighter load), values <1 decrease it (heavier load / more arrivals).
+    base_inter_arrival = max(0.01, (avg_inter_arrival_time * 3600) / time_scale)
+    if arrival_rate_factor is None:
+        scaled_inter_arrival = base_inter_arrival
+    else:
+        try:
+            arf = float(arrival_rate_factor)
+            if arf <= 0:
+                arf = 1.0
+        except Exception:
+            arf = 1.0
+        scaled_inter_arrival = max(0.01, base_inter_arrival * arf)
+
     dprint(f"[DEBUG] Time scale: {time_scale:.0f}s (median dur), "
-           f"raw inter-arrival={scaled_inter_arrival:.3f} time units")
+           f"base inter-arrival={base_inter_arrival:.3f}, scaled inter-arrival={scaled_inter_arrival:.3f} time units (arrival_rate_factor={arrival_rate_factor})")
 
     # ── Build the transition matrix as numpy array for fast sampling ─────
     # transition_matrix[i] is the probability distribution over next activities
@@ -468,16 +481,14 @@ def create_task_assignment_problem(parameters, time_scale=None,
     # ── Create the GymProblem ────────────────────────────────────────────
     problem = GymProblem(causal_rl=False)
 
-    # Shared resource pool represented as one-hot resource flags
-    n_res = len(valid_resources)
-    resource_flag_names = [f"is_resource_{i}" for i in range(n_res)]
-    resource_pool = problem.add_var("resource_pool", var_attributes=resource_flag_names)
-    for idx in range(n_res):
-        flags = {f"is_resource_{j}": (1.0 if (j == idx) else 0.0) for j in range(n_res)}
-        resource_pool.put(flags)
-    dprint(f"[DEBUG] - Placed {n_res} resource tokens")
+    # Shared resource pool
+    resource_pool = problem.add_var("resource_pool", var_attributes=['resource_idx'])
+    for idx in range(len(valid_resources)):
+        resource_pool.put({'resource_idx': float(idx)})
+    dprint(f"[DEBUG] - Placed {len(valid_resources)} resource tokens")
 
-    # (case_id removed - not used)
+    # Case counter for unique case IDs
+    case_counter = [0]
 
     # ── Per-activity places ──────────────────────────────────────────────
     # waiting_{act}: tasks waiting to be assigned for this activity
@@ -487,12 +498,9 @@ def create_task_assignment_problem(parameters, time_scale=None,
     busy_places = {}
     routed_places = {}
 
-    # Replace numeric activity index with one-hot boolean flags per activity
-    # plus an `is_done` flag to indicate terminal/done tokens.
-    activity_flag_names = [f"is_activity_{i}" for i in range(n_act)]
-    token_attrs_waiting = activity_flag_names + ['is_done']
-    token_attrs_busy = activity_flag_names + ['is_done'] + resource_flag_names
-    token_attrs_routed = activity_flag_names + ['is_done']
+    token_attrs_waiting = ['case_id', 'activity_idx']
+    token_attrs_busy = ['case_id', 'activity_idx', 'resource_idx']
+    token_attrs_routed = ['case_id', 'activity_idx']
 
     for act in mapped_activities:
         s = _safe(act)
@@ -509,23 +517,25 @@ def create_task_assignment_problem(parameters, time_scale=None,
     # We need an arrival output that can fan out to any start activity's
     # waiting place.  Since the start activity is probabilistic, we route
     # through a single "new_case" place, then a routing event distributes.
-    new_case = problem.add_var("new_case", var_attributes=activity_flag_names + ['is_done'])
+    new_case = problem.add_var("new_case", var_attributes=['case_id', 'activity_idx'])
 
-    def _make_activity_flags(idx):
-        """Return a dict of numeric activity flags (1.0/0.0) with only idx True and is_done 0.0."""
-        flags = {f"is_activity_{j}": (1.0 if (j == idx) else 0.0) for j in range(n_act)}
-        flags['is_done'] = 0.0
-        return flags
+    # Monotonic enqueue counter used to stamp tokens when they enter waiting places.
+    # Using a list to capture by reference in nested functions.
+    enqueue_counter = [0.0]
 
     def arrive(arrival_token):
         # Pick start activity
         acts = list(start_probs.keys())
         probs = [start_probs[a] for a in acts]
         start_act = np.random.choice(acts, p=probs)
-        a_idx = activity_to_idx[start_act]
+        a_idx = float(activity_to_idx[start_act])
+
+        cid = float(case_counter[0])
+        case_counter[0] += 1
+
         delay = max(0.01, np.random.exponential(scaled_inter_arrival))
         return [
-            SimToken({**{f"is_activity_{j}": (1.0 if (j == a_idx) else 0.0) for j in range(n_act)}, 'is_done': 0.0}),   # new case token (no case_id)
+            SimToken({'case_id': cid, 'activity_idx': a_idx}),   # new case token
             SimToken(arrival_token, delay=delay),                  # re-trigger
         ]
 
@@ -533,21 +543,23 @@ def create_task_assignment_problem(parameters, time_scale=None,
     dprint("[DEBUG] Arrival event added")
 
     # ── Route new_case to the correct waiting place ──────────────────────
-    # One routing event per mapped activity with a guard on activity boolean flags.
+    # One routing event per mapped activity with a guard on activity_idx.
     for act in mapped_activities:
-        a_idx = activity_to_idx[act]
+        a_idx = float(activity_to_idx[act])
         s = _safe(act)
 
         def make_guard_new(target):
             def guard(tok):
-                val = tok.value if hasattr(tok, 'value') else tok
-                return bool(val.get(f"is_activity_{target}", 0))
+                return tok['activity_idx'] == target
             return guard
 
         def make_route_new():
             def route(tok):
-                val = tok.value if hasattr(tok, 'value') else tok
-                return [SimToken(val)]
+                # stamp arrival counter to preserve FIFO ordering
+                nt = dict(tok)
+                nt['counter'] = float(enqueue_counter[0])
+                enqueue_counter[0] += 1
+                return [SimToken(nt)]
             return route
 
         problem.add_event(
@@ -560,11 +572,12 @@ def create_task_assignment_problem(parameters, time_scale=None,
     dprint("[DEBUG] New-case routing events added")
 
     # ── Per-activity: assign action + complete event + routing event ─────
-    # "done" place: cases that finished all activities (tokens carry activity flags)
-    done = problem.add_var("done", var_attributes=activity_flag_names + ['is_done'])
+    # "done" place: cases that finished all activities
+    done = problem.add_var("done", var_attributes=['case_id', 'activity_idx'])
 
-    # Shared intermediate routing place: tokens here carry activity boolean flags
-    routed_next = problem.add_var("routed_next", var_attributes=activity_flag_names + ['is_done'])
+    # Shared intermediate routing place: tokens here have activity_idx = next activity
+    # (or n_act sentinel for "done")
+    routed_next = problem.add_var("routed_next", var_attributes=['case_id', 'activity_idx'])
 
     for act in mapped_activities:
         a_idx = activity_to_idx[act]
@@ -574,18 +587,8 @@ def create_task_assignment_problem(parameters, time_scale=None,
         # ── ASSIGN action (RL decision) ──────────────────────────────
         def make_assign(act_name, act_idx, rmap, tscale):
             def assign(task, resource):
-                task_val = task.value if hasattr(task, 'value') else task
-                resource_val = resource.value if hasattr(resource, 'value') else resource
-                # resource_val is a dict of is_resource_i flags; find the active one
-                res_idx = None
-                for j in range(n_res):
-                    if resource_val.get(f"is_resource_{j}", 0):
-                        res_idx = j
-                        break
-                if res_idx is None:
-                    # fallback: pick first resource
-                    res_idx = 0
-                res_name = valid_resources[res_idx]
+                resource_idx = int(resource['resource_idx'])
+                res_name = valid_resources[resource_idx]
                 if res_name in rmap:
                     raw_sec = rmap[res_name]
                     if raw_sec is None or (isinstance(raw_sec, float) and np.isnan(raw_sec)):
@@ -594,12 +597,11 @@ def create_task_assignment_problem(parameters, time_scale=None,
                         dur = max(0.01, abs(raw_sec) / tscale)
                 else:
                     dur = 1.0
-                # Build numeric flags with only this activity True
-                flags = {f"is_activity_{j}": (1.0 if (j == act_idx) else 0.0) for j in range(n_act)}
-                flags['is_done'] = 0.0
-                # attach numeric resource flags to the busy token
-                res_flags = {f"is_resource_{j}": (1.0 if (j == res_idx) else 0.0) for j in range(n_res)}
-                return [SimToken({**flags, **res_flags}, delay=dur)]
+                return [SimToken({
+                    'case_id': task['case_id'],
+                    'activity_idx': float(act_idx),
+                    'resource_idx': float(resource_idx),
+                }, delay=dur)]
             return assign
 
         problem.add_action(
@@ -612,15 +614,11 @@ def create_task_assignment_problem(parameters, time_scale=None,
         # ── COMPLETE event: free resource, move token to routed place ─
         def make_complete():
             def complete(tok):
-                tok_val = tok.value if hasattr(tok, 'value') else tok
-                # Return resource flags back to pool (preserve which resource)
-                res_flags = {f"is_resource_{j}": (1.0 if tok_val.get(f"is_resource_{j}", 0) else 0.0) for j in range(n_res)}
-                resource_token = SimToken(res_flags)
-                # Extract activity flags and is_done from the busy token (numeric)
-                flags = {f"is_activity_{j}": (1.0 if tok_val.get(f"is_activity_{j}", 0) else 0.0) for j in range(n_act)}
-                flags['is_done'] = (1.0 if tok_val.get('is_done', 0) else 0.0)
-                routed_token = SimToken(flags)
-                return [resource_token, routed_token]
+                return [
+                    SimToken({'resource_idx': tok['resource_idx']}),        # back to pool
+                    SimToken({'case_id': tok['case_id'],
+                              'activity_idx': tok['activity_idx']}),        # to routing
+                ]
             return complete
 
         problem.add_event(
@@ -637,20 +635,17 @@ def create_task_assignment_problem(parameters, time_scale=None,
         probs_vec = transition_matrix[src_idx]  # length n_act+1
 
         def make_sample_route(prob_vec, n, idx2act, ma_set):
-            """Sample next activity and encode using boolean flags (or is_done)."""
+            """Sample next activity and encode in activity_idx (n_act = done)."""
             def route(tok):
-                # tok may be a SimToken or dict; unwrap if needed
-                tok_val = tok.value if hasattr(tok, 'value') else tok
                 next_idx = int(np.random.choice(len(prob_vec), p=prob_vec))
                 next_act = idx2act.get(next_idx)
                 if next_idx >= n or next_act not in ma_set:
-                    # Mark as done using numeric flags
-                    flags = {f"is_activity_{j}": 0.0 for j in range(n)}
-                    flags['is_done'] = 1.0
-                else:
-                    flags = {f"is_activity_{j}": (1.0 if (j == next_idx) else 0.0) for j in range(n)}
-                    flags['is_done'] = 0.0
-                return [SimToken(flags)]
+                    # Mark as "done" using a sentinel index
+                    next_idx = n
+                return [SimToken({
+                    'case_id': tok['case_id'],
+                    'activity_idx': float(next_idx),
+                })]
             return route
 
         problem.add_event(
@@ -663,19 +658,21 @@ def create_task_assignment_problem(parameters, time_scale=None,
 
     # ── Guarded dispatch from routed_next to individual waiting places ───
     for act in mapped_activities:
-        a_idx = activity_to_idx[act]
+        a_idx = float(activity_to_idx[act])
         s = _safe(act)
 
         def make_guard_dispatch(target_idx):
             def guard(tok):
-                val = tok.value if hasattr(tok, 'value') else tok
-                return bool(val.get(f"is_activity_{target_idx}", 0))
+                return tok['activity_idx'] == target_idx
             return guard
 
         def make_dispatch():
             def dispatch(tok):
-                val = tok.value if hasattr(tok, 'value') else tok
-                return [SimToken(val)]
+                # stamp arrival counter when dispatching to waiting place
+                nt = dict(tok)
+                nt['counter'] = float(enqueue_counter[0])
+                enqueue_counter[0] += 1
+                return [SimToken(nt)]
             return dispatch
 
         problem.add_event(
@@ -686,15 +683,13 @@ def create_task_assignment_problem(parameters, time_scale=None,
         )
 
     # Dispatch for "done" (activity_idx == n_act sentinel)
-    # 'done' is represented by the 'is_done' flag being True
+    done_sentinel = float(n_act)
 
     def guard_done(tok):
-        val = tok.value if hasattr(tok, 'value') else tok
-        return bool(val.get('is_done', 0))
+        return tok['activity_idx'] == done_sentinel
 
     def dispatch_done(tok):
-        val = tok.value if hasattr(tok, 'value') else tok
-        return [SimToken(val)]
+        return [SimToken(tok)]
 
     problem.add_event(
         [routed_next], [done],

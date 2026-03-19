@@ -12,14 +12,15 @@ from gympn.simulator import GymProblem
 from gympn.solvers import GymSolver
 
 class PolicyConformance(GymProblem):
-
     """
-    This class is used to analyze the conformance of a given heuristic policy to a policy trained on a given GymProblem.
-    The conformance between policies is measured by:
+    Measures conformance between a heuristic policy (P1) and a reference policy (P2)
+    on a shared GymProblem, across three per-observation metrics:
 
-    1. The frequency of state visits for both policies.
-    2. The similarity of actions taken by both policies in the same state.
-    3. The loss of rewards between the two policies from the same state.
+    - **Max Visit Ratio** — relative visit frequency; used as a reliability filter.
+    - **EMAC** — Earth Mover's Action Conformance; total-variation distance between
+      the policies' action distributions: EMAC(s) = 1 - sum_a min(P1(a|s), P2(a|s)).
+    - **PERG** — Policy Expected Reward Gap; E[R|P1,o] - E[R|P2,o] estimated via
+      rollouts, computed only where EMAC > rho and MaxVisitRatio > eta.
     """
 
     def __init__(self, gym_problem, heuristic_solver, gym_solver, state_variables, excluded_token_attrs=None):
@@ -91,114 +92,61 @@ class PolicyConformance(GymProblem):
         function_results = [self.evaluate(gym_problem, f) for f in functions]
 
         return function_results
-    
-    def frequency_run(self, solver, length, reporter=None):
 
+    def compute_state_visit_frequency(self, horizon=10):
         """
-        The frequency run measures the frequency of state visits for the given solver over a specified duration.
-        :param solver: An instance of a solver class implementing the `BaseSolver` interface.
-        :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
-        :param reporter: A reporter to log simulation events.
-        :return: The frequency of state visits for the given solver.
+        Measure the frequency of state visits for both policies and store the
+        results in ``self.p1_state_visit_frequency`` and
+        ``self.p2_state_visit_frequency``.
+
+        Counts are accumulated so the method can be called multiple times
+        (e.g. over several episodes) without losing earlier results.
         """
+        frequency_1 = self.frequency_run(solver=self.heuristic_solver, length=horizon)
+        frequency_2 = self.frequency_run(solver=self.gym_solver, length=horizon)
 
-        if not isinstance(solver, BaseSolver):
-            raise Exception(f"The provided solver {solver} does not extend BaseSolver")
+        for obs, count in frequency_1.items():
+            self.p1_state_visit_frequency[obs] = self.p1_state_visit_frequency.get(obs, 0) + count
+        for obs, count in frequency_2.items():
+            self.p2_state_visit_frequency[obs] = self.p2_state_visit_frequency.get(obs, 0) + count
 
-        # Reset the gym_problem to initial state before each run
-        gym_problem = copy.deepcopy(self.frozen_gym_problem)
-        
-        gym_problem.set_solver(solver)
-        gym_problem.length = length
-        active_model = True
-        
-        state_visit_frequency = None
-        state_visit_frequency = {}
+        return frequency_1, frequency_2
 
-        while gym_problem.clock <= gym_problem.length and active_model:
-
-            state_variables = self.calculate_functions(gym_problem, self.state_variables)
-            binding, active_model = gym_problem.step(reporter, gym_problem.length)
-            
-            if gym_problem.clock > gym_problem.length:
-                #print("Clock exceeds length")
-                break
-            
-            # After each step, calculate the state variables and update the conformance measures  
-            all_actions = gym_problem.actions + [None]
-            if binding[2] in all_actions:
-                if tuple(state_variables) not in state_visit_frequency.keys():
-                    state_visit_frequency[tuple(state_variables)] = 1
-                else:
-                    state_visit_frequency[tuple(state_variables)] += 1
-
-        return state_visit_frequency
-
-    def action_run(self, solver_1, solver_2 = None, length=100):
+    def compute_max_visit_ratio(self):
         """
-        The action run measures the actions taken by the given solver over a specified duration.
+        Compute the max visit ratio for every observation seen by either policy.
 
-        :param solver: An instance of a solver class implementing the `BaseSolver` interface. 
-                       Steps follow solver_1. If solver_2 is provided, action mapping p2 is also updated for visited states.
-        :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
-        :param reporter: A reporter to log simulation events.
-        :return: The total reward accumulated during the testing run.
+        For observation ``s``:
+
+            MaxVisitRatio(s) = max( v_P1(s) / total_P1,  v_P2(s) / total_P2 )
+
+        where ``total_Pi`` is the total number of action-step visits recorded
+        for policy ``i``.  This measures the largest *relative* attention either
+        policy pays to ``s``; observations with a low ratio were rarely visited
+        and are statistically less reliable.
+
+        :return: dict mapping observation tuple -> max visit ratio in (0, 1].
+        :raises RuntimeError: if ``compute_state_visit_frequency`` has not been
+                              called yet.
         """
+        if not self.p1_state_visit_frequency and not self.p2_state_visit_frequency:
+            raise RuntimeError(
+                "compute_state_action_mapping() must be called before "
+                "compute_max_visit_ratio()."
+            )
 
-        if not isinstance(solver_1, BaseSolver):
-            raise Exception(f"The provided solver {solver_1} does not extend BaseSolver")
+        total_p1 = sum(self.p1_state_visit_frequency.values())
+        total_p2 = sum(self.p2_state_visit_frequency.values())
 
-        if not isinstance(solver_2, BaseSolver):
-            raise Exception(f"The provided solver {solver_2} does not extend BaseSolver")
+        all_obs = (set(self.p1_state_visit_frequency.keys())
+                   | set(self.p2_state_visit_frequency.keys()))
 
-        # Reset the gym_problem to initial state before each run
-        gym_problem = copy.deepcopy(self.frozen_gym_problem)
-        gym_problem.set_solver(solver_1)
-        gym_problem.length = length
-        
-        active_model = True
-
-        while gym_problem.clock <= gym_problem.length and active_model:
-           
-            bindings, active_model = gym_problem.bindings()
-            if len(bindings) > 0 and gym_problem.network_tag.is_evolution():
-                timed_binding = bindings[0]
-                gym_problem.fire(timed_binding)
-            
-            elif len(bindings) > 0 and gym_problem.network_tag.is_action():
-                state_variables = self.calculate_functions(gym_problem, self.state_variables)
-
-                # Record the action taken by the second solver
-                if solver_2 is not None:
-                    action_2 = str(self._get_solver_action(gym_problem, solver_2))
-
-                    # Count the action taken in the observation
-                    if tuple(state_variables) not in self.p2_state_action_mapping.keys():
-                        self.p2_state_action_mapping[tuple(state_variables)] = {action_2: 1}
-                    elif action_2 in self.p2_state_action_mapping[tuple(state_variables)]:
-                        self.p2_state_action_mapping[tuple(state_variables)][action_2] += 1
-                    else:
-                        self.p2_state_action_mapping[tuple(state_variables)][action_2] = 1
-                    
-                # Execute the action using solver 1
-                timed_binding, active_model = gym_problem.step(reporter=None, length=gym_problem.length)
-
-                # Record the action taken by the first solver (skip if step returned None, i.e. clock exceeded length)
-                if timed_binding is not None:
-                    action_1 = self._binding_key(timed_binding)
-                    state_key = tuple(state_variables)
-                    if state_key not in self.p1_state_action_mapping:
-                        self.p1_state_action_mapping[state_key] = {action_1: 1}
-                    elif action_1 in self.p1_state_action_mapping[state_key]:
-                        self.p1_state_action_mapping[state_key][action_1] += 1
-                    else:
-                        self.p1_state_action_mapping[state_key][action_1] = 1
-
-                    # Record the states in the observation
-                    if state_key not in self.states_in_observation:
-                        self.states_in_observation[state_key] = [copy.deepcopy(gym_problem)]
-                    else:
-                        self.states_in_observation[state_key].append(copy.deepcopy(gym_problem))
+        max_visit_ratio = {}
+        for obs in all_obs:
+            r_p1 = self.p1_state_visit_frequency.get(obs, 0) / total_p1 if total_p1 > 0 else 0.0
+            r_p2 = self.p2_state_visit_frequency.get(obs, 0) / total_p2 if total_p2 > 0 else 0.0
+            max_visit_ratio[obs] = max(r_p1, r_p2)
+        return max_visit_ratio
 
     def _binding_key(self, binding):
         """
@@ -217,8 +165,15 @@ class PolicyConformance(GymProblem):
         """
         transition_name = str(binding[2])
         token_parts = []
-        
-        if binding[2] is None:
+
+        # Postpone pseudo-binding: transition is None, or the token list
+        # contains a bare 'postpone' string (GymSolver may produce this when
+        # the postpone action is selected from obs['actions_dict']).
+        if binding[2] is None or (
+            isinstance(binding[0], (list, tuple))
+            and len(binding[0]) == 1
+            and str(binding[0][0]) == "postpone"
+        ):
             return "postpone"
         
         for item in binding[0]:
@@ -262,32 +217,228 @@ class PolicyConformance(GymProblem):
                 return "postpone"
         return self._binding_key(binding)
 
-    def expected_reward_run(self, solver_1, solver_2, tau, gamma, num_rollouts, num_steps):
+    def compute_state_action_mapping(self, horizon=10):
         """
-        Compute the expected reward for each solver using N Monte Carlo rollouts per state.
+        Record the actions each policy takes across both policies' trajectories.
 
-        For each observation with EMD > tau, all captured states are rolled out N times
-        under different random seeds to sample stochastic transitions. Rewards are averaged
-        across seeds and states to produce a per-observation expected reward.
-        Only reward accumulated during the rollout window is counted (pre-rollout reward
-        is subtracted), so results are comparable across observations.
+        Two simulation runs are performed:
+
+        1. Heuristic trajectory — heuristic executes, gym is queried counterfactually.
+           Heuristic's actions  → p1_state_action_mapping
+           Gym's actions        → p2_state_action_mapping
+
+        2. Gym trajectory — gym executes, heuristic is queried counterfactually.
+           Gym's actions        → p2_state_action_mapping  (mapping_1 is routed to p2)
+           Heuristic's actions  → p1_state_action_mapping  (mapping_2 is routed to p1)
+
+        Routing the second call's destination dicts explicitly prevents the
+        cross-contamination where gym actions would otherwise accumulate in p1
+        and heuristic actions in p2.
+        """
+        # Run 1: follow heuristic trajectory — also accumulate p1 visit frequencies
+        self.action_run(
+            solver_1=self.heuristic_solver,
+            solver_2=self.gym_solver,
+            length=horizon,
+            mapping_1=self.p1_state_action_mapping,
+            mapping_2=self.p2_state_action_mapping,
+            freq_mapping=self.p1_state_visit_frequency,
+        )
+        # Run 2: follow gym trajectory — swap destination dicts, accumulate p2 visits
+        self.action_run(
+            solver_1=self.gym_solver,
+            solver_2=self.heuristic_solver,
+            length=horizon,
+            mapping_1=self.p2_state_action_mapping,   # gym's executed actions → p2
+            mapping_2=self.p1_state_action_mapping,   # heuristic's counterfactual → p1
+            freq_mapping=self.p2_state_visit_frequency,
+        )
+
+        return self.p1_state_action_mapping, self.p2_state_action_mapping
+
+    def compute_action_probability(self, action_mapping):
+        """
+        Compute the probability that the given action is taken in the given state.
+        """
+        # Compute the probability that the given action is taken in the given state
+        action_probability = {}
+        for state in action_mapping.keys():
+            action_probability[state] = {}
+            
+            # The probability of an action in a state is the number of times the action is taken in the state divided by the total number of actions taken following pi_1 and pi_2.
+            for action in action_mapping[state].keys():
+                action_probability[state][action] = round(action_mapping[state][action] / sum(action_mapping[state].values()), 4)
+
+        return action_probability
+
+    def frequency_run(self, solver, length, reporter=None):
+
+        """
+        The frequency run measures the frequency of state visits for the given solver over a specified duration.
+        :param solver: An instance of a solver class implementing the `BaseSolver` interface.
+        :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
+        :param reporter: A reporter to log simulation events.
+        :return: The frequency of state visits for the given solver.
+        """
+
+        if not isinstance(solver, BaseSolver):
+            raise Exception(f"The provided solver {solver} does not extend BaseSolver")
+
+        # Reset the gym_problem to initial state before each run
+        gym_problem = copy.deepcopy(self.frozen_gym_problem)
+        
+        gym_problem.set_solver(solver)
+        gym_problem.length = length
+        active_model = True
+        
+        state_visit_frequency = None
+        state_visit_frequency = {}
+
+        while gym_problem.clock <= gym_problem.length and active_model:
+
+            state_variables = self.calculate_functions(gym_problem, self.state_variables)
+            binding, active_model = gym_problem.step(reporter, gym_problem.length)
+            
+            if gym_problem.clock > gym_problem.length:
+                #print("Clock exceeds length")
+                break
+            
+            # After each step, calculate the state variables and update the conformance measures  
+            all_actions = gym_problem.actions + [None]
+            if binding[2] in all_actions:
+                if tuple(state_variables) not in state_visit_frequency.keys():
+                    state_visit_frequency[tuple(state_variables)] = 1
+                else:
+                    state_visit_frequency[tuple(state_variables)] += 1
+
+        return state_visit_frequency
+
+    def action_run(self, solver_1, solver_2=None, length=100,
+                   mapping_1=None, mapping_2=None, freq_mapping=None):
+        """
+        The action run measures the actions taken by the given solver over a specified duration.
+
+        The trajectory follows solver_1.  At each action step:
+          - solver_1's executed action is recorded into mapping_1,
+          - solver_2's counterfactual action is recorded into mapping_2,
+          - the visit count for that observation is incremented in freq_mapping.
+
+        All three dicts accumulate across repeated calls.  mapping_1/mapping_2
+        default to self.p1/p2_state_action_mapping; freq_mapping defaults to
+        None (no frequency tracking) and is set explicitly by
+        compute_state_action_mapping to keep visit counts aligned with the
+        action recordings from the same simulation run.
+
+        :param solver_1: Solver whose trajectory is followed (executes actions).
+        :param solver_2: Solver whose counterfactual action is recorded at each step.
+        :param length: Maximum simulation duration.
+        :param mapping_1: Dict to accumulate solver_1's executed actions into.
+        :param mapping_2: Dict to accumulate solver_2's counterfactual actions into.
+        :param freq_mapping: Dict to accumulate per-observation visit counts for
+                             solver_1's trajectory.  Pass None to skip tracking.
+        """
+
+        if not isinstance(solver_1, BaseSolver):
+            raise Exception(f"The provided solver {solver_1} does not extend BaseSolver")
+
+        if not isinstance(solver_2, BaseSolver):
+            raise Exception(f"The provided solver {solver_2} does not extend BaseSolver")
+
+        if mapping_1 is None:
+            mapping_1 = self.p1_state_action_mapping
+        if mapping_2 is None:
+            mapping_2 = self.p2_state_action_mapping
+
+        # Reset the gym_problem to initial state before each run
+        gym_problem = copy.deepcopy(self.frozen_gym_problem)
+        gym_problem.set_solver(solver_1)
+        gym_problem.length = length
+        
+        active_model = True
+
+        while gym_problem.clock <= gym_problem.length and active_model:
+           
+            bindings, active_model = gym_problem.bindings()
+            if len(bindings) > 0 and gym_problem.network_tag.is_evolution():
+                timed_binding = bindings[0]
+                gym_problem.fire(timed_binding)
+            
+            elif len(bindings) > 0 and gym_problem.network_tag.is_action():
+                state_variables = self.calculate_functions(gym_problem, self.state_variables)
+
+                # Record the counterfactual action of solver_2 into mapping_2
+                if solver_2 is not None:
+                    action_2 = str(self._get_solver_action(gym_problem, solver_2))
+                    state_key_2 = tuple(state_variables)
+                    if state_key_2 not in mapping_2:
+                        mapping_2[state_key_2] = {action_2: 1}
+                    elif action_2 in mapping_2[state_key_2]:
+                        mapping_2[state_key_2][action_2] += 1
+                    else:
+                        mapping_2[state_key_2][action_2] = 1
+
+                # Execute the action using solver_1
+                timed_binding, active_model = gym_problem.step(reporter=None, length=gym_problem.length)
+
+                # Record solver_1's executed action into mapping_1
+                if timed_binding is not None:
+                    action_1 = self._binding_key(timed_binding)
+                    state_key = tuple(state_variables)
+                    if state_key not in mapping_1:
+                        mapping_1[state_key] = {action_1: 1}
+                    elif action_1 in mapping_1[state_key]:
+                        mapping_1[state_key][action_1] += 1
+                    else:
+                        mapping_1[state_key][action_1] = 1
+
+                    # Track visit frequency at action states (Option C)
+                    if freq_mapping is not None:
+                        freq_mapping[state_key] = freq_mapping.get(state_key, 0) + 1
+
+                    # Record the states in the observation (only for the executing solver's trajectory)
+                    if state_key not in self.states_in_observation:
+                        self.states_in_observation[state_key] = [copy.deepcopy(gym_problem)]
+                    else:
+                        self.states_in_observation[state_key].append(copy.deepcopy(gym_problem))
+
+    def expected_reward_run(self, solver_1, solver_2, rho, eta, num_rollouts, num_steps):
+        """
+        Compute the expected reward for each solver using rollouts.
+
+        Only observations that pass **both** thresholds are evaluated:
+
+        * ``EMAC(s) > rho``  — the action distributions differ enough to be
+          worth investigating (stochastic conformance filter).
+        * ``MaxVisitRatio(s) > eta``  — the observation was visited frequently
+          enough by at least one policy to be worth investigating
+          (visit-frequency filter).  Set ``eta=0`` to disable this filter.
+
+        Rewards are averaged across rollout seeds and captured observations.  Only
+        reward accumulated during the rollout window is counted (pre-rollout
+        reward is subtracted) so results are comparable across observations.
 
         :param solver_1: First policy (P1).
         :param solver_2: Second policy (P2).
-        :param tau: EMD threshold; only observations with EMD > tau are evaluated.
-                    Also used as the rollout horizon (state.clock + tau).
-        :param gamma: Discount factor (reserved for future discounted reward computation).
-        :param N: Number of Monte Carlo rollouts per state per solver.
+        :param rho: EMAC threshold; only observations with EMAC > rho pass.
+        :param eta: Max visit ratio threshold; only observations where
+                    MaxVisitRatio > eta pass.
+        :param num_rollouts: Monte Carlo rollouts per state per solver.
+        :param num_steps: Rollout window length added to ``state.clock``.
         :return: Tuple of (expected_reward_p1, expected_reward_p2, delta_expected_reward).
         """
 
-        overlap_obs = [key for key, value in self.state_action_emd.items() if value > tau]
-        print(f'Overlapping observations: {overlap_obs}')
+        max_visit_ratio = self.compute_max_visit_ratio()
+
+        overlap_obs = [
+            key for key, value in self.state_action_emd.items()
+            if value > rho and max_visit_ratio.get(key, 0.0) > eta
+        ]
+        print(f"Observations passing filters (EMAC>{rho}, MaxVisitRatio>{eta}): {overlap_obs}")
 
         for obs in overlap_obs:
-            print(f'Progress: {overlap_obs.index(obs)+1}/{len(overlap_obs)}')
+            #print(f'Progress: {overlap_obs.index(obs)+1}/{len(overlap_obs)}')
             states = self.states_in_observation[obs]
-            print(f'Rollouts for observation: {obs}. States: {len(states)}, rollouts per state: {num_rollouts}')
+            #print(f'Rollouts for observation: {obs}. States: {len(states)}, rollouts per state: {num_rollouts}')
 
             total_reward_pi_1 = 0.0
             total_reward_pi_2 = 0.0
@@ -350,7 +501,7 @@ class PolicyConformance(GymProblem):
                 total_reward_pi_2 += seed_reward_pi_2
 
             evaluated = len(states) - skipped
-            print(f'Skipped {skipped}/{len(states)} states (same action). Evaluated: {evaluated}')
+            #print(f'Skipped {skipped}/{len(states)} states (same action). Evaluated: {evaluated}')
             if evaluated > 0:
                 total_reward_pi_1 /= evaluated
                 total_reward_pi_2 /= evaluated
@@ -361,43 +512,6 @@ class PolicyConformance(GymProblem):
 
         return self.expected_reward_p1, self.expected_reward_p2, self.delta_expected_reward
 
-    def compute_state_visit_frequency(self, horizon=10):
-        """
-        Measure the frequency of state visits for the heuristic policy.
-        """
-        # Computing state visit frequency for the heuristic
-        frequency_1 = self.frequency_run(solver=self.heuristic_solver, length=horizon)
-        # Computing state visit frequency for the gym solver
-        frequency_2 = self.frequency_run(solver=self.gym_solver, length=horizon)
-        
-        return frequency_1, frequency_2
-    
-    def compute_state_action_mapping(self, horizon=10):
-        """
-        Measure the frequency of state visits for the gym policy.
-        """
-        # Computing state action mapping following the heuristic solver
-        self.action_run(solver_1=self.heuristic_solver, solver_2=self.gym_solver, length=horizon)
-        # Computing state action mapping following the gym solver
-        self.action_run(solver_1=self.gym_solver, solver_2=self.heuristic_solver, length=horizon)
-        
-        return self.p1_state_action_mapping, self.p2_state_action_mapping
-    
-    def compute_action_probability(self, action_mapping):
-        """
-        Compute the probability that the given action is taken in the given state.
-        """
-        # Compute the probability that the given action is taken in the given state
-        action_probability = {}
-        for state in action_mapping.keys():
-            action_probability[state] = {}
-            
-            # The probability of an action in a state is the number of times the action is taken in the state divided by the total number of actions taken following pi_1 and pi_2.
-            for action in action_mapping[state].keys():
-                action_probability[state][action] = round(action_mapping[state][action] / sum(action_mapping[state].values()), 4)
-
-        return action_probability
-    
     @staticmethod
     def earth_mover_distance_action_distributions(prob_1, prob_2):
         """

@@ -1,4 +1,7 @@
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import sys
 import copy
 import numpy as np

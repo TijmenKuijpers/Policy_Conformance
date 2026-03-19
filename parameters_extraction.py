@@ -30,13 +30,16 @@ if __name__ == "__main__":
     avg_inter_arrival_time = log.groupby("case:concept:name")["case:duration"].first().mean()
 
     #extract the transition probability between activities (within each case)
+    # IMPORTANT: the last activity in each case transitions to "__DONE__" (case finished)
     log = log.sort_values(["case:concept:name", "time:timestamp"])
     log["next_activity"] = log.groupby("case:concept:name")["concept:name"].shift(-1)
-    # Drop rows where next_activity is NaN (last event of each case)
-    transitions = log.dropna(subset=["next_activity"])
+    # Replace NaN (last event of each case) with "__DONE__" instead of dropping
+    log["next_activity"] = log["next_activity"].fillna("__DONE__")
+    transitions = log  # keep all rows including end-of-case
+    all_targets = list(activities) + ["__DONE__"]
     transition_counts = transitions.groupby(["concept:name", "next_activity"]).size().unstack(fill_value=0)
-    # Reindex so every activity appears as both row and column
-    transition_counts = transition_counts.reindex(index=activities, columns=activities, fill_value=0)
+    # Reindex so every activity appears as row, and all targets (incl __DONE__) as columns
+    transition_counts = transition_counts.reindex(index=activities, columns=all_targets, fill_value=0)
     transition_probabilities = transition_counts.div(transition_counts.sum(axis=1), axis=0).fillna(0)
 
     #extract the start activity probabilities (which activity starts a case)
@@ -50,7 +53,7 @@ if __name__ == "__main__":
         "resources": resources.tolist(),
         "activity_resource_mapping": activity_resource_mapping,
         "avg_inter_arrival_time": avg_inter_arrival_time,
-        "transition_probabilities": transition_probabilities.to_dict(),
+        "transition_probabilities": transition_probabilities.to_dict(orient='index'),
         "start_activity_probabilities": start_activity_probabilities,
     }
 
