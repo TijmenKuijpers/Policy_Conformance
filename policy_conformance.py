@@ -398,8 +398,9 @@ import copy
 import inspect
 import random
 import numpy as np
-sys.path.append("C:/Users/lobia/PycharmProjects/policy_comparison/Policy_Conformance/gympn")
+sys.path.append("C:/Users/20183272/OneDrive - TU Eindhoven/Documents/GitHub/gympn")
 import torch
+import time
 
 from gympn.solvers import BaseSolver
 from gympn.simulator import GymProblem
@@ -487,25 +488,6 @@ class PolicyConformance(GymProblem):
 
         return function_results
 
-    def compute_state_visit_frequency(self, horizon=10):
-        """
-        Measure the frequency of state visits for both policies and store the
-        results in ``self.p1_state_visit_frequency`` and
-        ``self.p2_state_visit_frequency``.
-
-        Counts are accumulated so the method can be called multiple times
-        (e.g. over several episodes) without losing earlier results.
-        """
-        frequency_1 = self.frequency_run(solver=self.heuristic_solver, length=horizon)
-        frequency_2 = self.frequency_run(solver=self.gym_solver, length=horizon)
-
-        for obs, count in frequency_1.items():
-            self.p1_state_visit_frequency[obs] = self.p1_state_visit_frequency.get(obs, 0) + count
-        for obs, count in frequency_2.items():
-            self.p2_state_visit_frequency[obs] = self.p2_state_visit_frequency.get(obs, 0) + count
-
-        return frequency_1, frequency_2
-
     def compute_max_visit_ratio(self):
         """
         Compute the max visit ratio for every observation seen by either policy.
@@ -520,7 +502,7 @@ class PolicyConformance(GymProblem):
         and are statistically less reliable.
 
         :return: dict mapping observation tuple -> max visit ratio in (0, 1].
-        :raises RuntimeError: if ``compute_state_visit_frequency`` has not been
+        :raises RuntimeError: if ``compute_state_action_mapping`` has not been
                               called yet.
         """
         if not self.p1_state_visit_frequency and not self.p2_state_visit_frequency:
@@ -665,48 +647,6 @@ class PolicyConformance(GymProblem):
 
         return action_probability
 
-    def frequency_run(self, solver, length, reporter=None):
-
-        """
-        The frequency run measures the frequency of state visits for the given solver over a specified duration.
-        :param solver: An instance of a solver class implementing the `BaseSolver` interface.
-        :param length: The maximum duration of the testing run. The simulation will stop if the clock exceeds (or matches) this length.
-        :param reporter: A reporter to log simulation events.
-        :return: The frequency of state visits for the given solver.
-        """
-
-        if not isinstance(solver, BaseSolver):
-            raise Exception(f"The provided solver {solver} does not extend BaseSolver")
-
-        # Reset the gym_problem to initial state before each run
-        gym_problem = copy.deepcopy(self.frozen_gym_problem)
-        
-        gym_problem.set_solver(solver)
-        gym_problem.length = length
-        active_model = True
-        
-        state_visit_frequency = None
-        state_visit_frequency = {}
-
-        while gym_problem.clock <= gym_problem.length and active_model:
-
-            state_variables = self.calculate_functions(gym_problem, self.state_variables)
-            binding, active_model = gym_problem.step(reporter, gym_problem.length)
-            
-            if gym_problem.clock > gym_problem.length:
-                #print("Clock exceeds length")
-                break
-            
-            # After each step, calculate the state variables and update the conformance measures  
-            all_actions = gym_problem.actions + [None]
-            if binding[2] in all_actions:
-                if tuple(state_variables) not in state_visit_frequency.keys():
-                    state_visit_frequency[tuple(state_variables)] = 1
-                else:
-                    state_visit_frequency[tuple(state_variables)] += 1
-
-        return state_visit_frequency
-
     def action_run(self, solver_1, solver_2=None, length=100,
                    mapping_1=None, mapping_2=None, freq_mapping=None):
         """
@@ -755,8 +695,9 @@ class PolicyConformance(GymProblem):
             bindings, active_model = gym_problem.bindings()
             if len(bindings) > 0 and gym_problem.network_tag.is_evolution():
                 timed_binding = bindings[0]
-                gym_problem.fire(timed_binding)
-            
+                new_tokens = gym_problem.fire(timed_binding)
+                # update rewards
+                gym_problem.update_reward(timed_binding, new_tokens)
             elif len(bindings) > 0 and gym_problem.network_tag.is_action():
                 state_variables = self.calculate_functions(gym_problem, self.state_variables)
 
@@ -770,7 +711,18 @@ class PolicyConformance(GymProblem):
                         mapping_2[state_key_2][action_2] += 1
                     else:
                         mapping_2[state_key_2][action_2] = 1
+<<<<<<< Updated upstream
                     
+=======
+                
+                # Record the states in the observation (only for the executing solver's trajectory)
+                state_key = tuple(state_variables)
+                if state_key not in self.states_in_observation:
+                    self.states_in_observation[state_key] = [copy.deepcopy(gym_problem)]
+                else:
+                    self.states_in_observation[state_key].append(copy.deepcopy(gym_problem))
+                
+>>>>>>> Stashed changes
                 # Execute the action using solver_1
                 timed_binding, active_model = gym_problem.step(reporter=None, length=gym_problem.length)
 
@@ -789,11 +741,7 @@ class PolicyConformance(GymProblem):
                     if freq_mapping is not None:
                         freq_mapping[state_key] = freq_mapping.get(state_key, 0) + 1
 
-                    # Record the states in the observation (only for the executing solver's trajectory)
-                    if state_key not in self.states_in_observation:
-                        self.states_in_observation[state_key] = [copy.deepcopy(gym_problem)]
-                    else:
-                        self.states_in_observation[state_key].append(copy.deepcopy(gym_problem))
+
 
     def expected_reward_run(self, solver_1, solver_2, rho, eta, num_rollouts, num_steps):
         """
@@ -827,18 +775,30 @@ class PolicyConformance(GymProblem):
             key for key, value in self.state_action_emd.items()
             if value > rho and max_visit_ratio.get(key, 0.0) > eta
         ]
-        print(f"Observations passing filters (EMAC>{rho}, MaxVisitRatio>{eta}): {overlap_obs}")
-
+        #print(f"Observations passing filters (EMAC>{rho}, MaxVisitRatio>{eta}): {overlap_obs}")
+        print(f"Number of observations passing filters: {len(overlap_obs)}")
+        print(f"Number of states per observation:")
+        print(f"- mean: {np.mean([len(self.states_in_observation[obs]) for obs in overlap_obs])}")
+        print(f"- median: {np.median([len(self.states_in_observation[obs]) for obs in overlap_obs])}")
+        print(f"- std: {np.std([len(self.states_in_observation[obs]) for obs in overlap_obs])}")
+        print(f"- max: {np.max([len(self.states_in_observation[obs]) for obs in overlap_obs])}")
+        print(f"- min: {np.min([len(self.states_in_observation[obs]) for obs in overlap_obs])}")
+        
         for obs in overlap_obs:
-            #print(f'Progress: {overlap_obs.index(obs)+1}/{len(overlap_obs)}')
+            print(f'Progress: {overlap_obs.index(obs)+1}/{len(overlap_obs)}')
             states = self.states_in_observation[obs]
-            #print(f'Rollouts for observation: {obs}. States: {len(states)}, rollouts per state: {num_rollouts}')
+            print(f'States: {len(states)}, rollouts per state: {num_rollouts}')
 
             total_reward_pi_1 = 0.0
             total_reward_pi_2 = 0.0
 
             skipped = 0
-            for state in states:
+            max_states = 10
+            
+            for i, state in enumerate(states):
+                if i >= max_states+skipped:
+                    break
+                time_start = time.time()
                 rollout_horizon = state.clock + num_steps
 
                 # Skip states where both solvers choose the same action
@@ -863,7 +823,10 @@ class PolicyConformance(GymProblem):
                     while rollout.clock <= rollout.length and active:
                         bindings, active = rollout.bindings()
                         if len(bindings) > 0 and rollout.network_tag.is_evolution():
-                            rollout.fire(bindings[0])
+                            new_tokens = rollout.fire(bindings[0])
+                            # update rewards
+                            rollout.update_reward(bindings[0], new_tokens)
+
                         elif len(bindings) > 0 and rollout.network_tag.is_action():
                             _, active = rollout.step(reporter=None, length=rollout.length)
 
@@ -887,18 +850,25 @@ class PolicyConformance(GymProblem):
                         bindings, active = rollout.bindings()
                         if len(bindings) > 0 and rollout.network_tag.is_evolution():
                             rollout.fire(bindings[0])
+                            # update rewards
+                            rollout.update_reward(bindings[0], new_tokens)
                         elif len(bindings) > 0 and rollout.network_tag.is_action():
                             _, active = rollout.step(reporter=None, length=rollout.length)
 
                     seed_reward_pi_2 += (rollout.reward - initial_reward) / num_rollouts
 
                 total_reward_pi_2 += seed_reward_pi_2
+                time_end = time.time()
+                print(f'Time taken for rollout {i+1}: {time_end - time_start} seconds')
 
             evaluated = len(states) - skipped
             #print(f'Skipped {skipped}/{len(states)} states (same action). Evaluated: {evaluated}')
             if evaluated > 0:
                 total_reward_pi_1 /= evaluated
                 total_reward_pi_2 /= evaluated
+
+            print(f'Total expected reward for pi_1: {total_reward_pi_1}')
+            print(f'Total expected reward for pi_2: {total_reward_pi_2}')
 
             self.expected_reward_p1[obs] = total_reward_pi_1
             self.expected_reward_p2[obs] = total_reward_pi_2
