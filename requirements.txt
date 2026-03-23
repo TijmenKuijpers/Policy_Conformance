@@ -1,0 +1,20 @@
+# Core numerical/data libraries
+numpy
+pandas>=2.2
+
+# Plotting
+matplotlib
+seaborn>=0.13
+
+# ML / GNN stack
+# Installed transitively by gympn with compatible versions:
+# - torch
+# - torch-geometric
+
+# Process mining
+pm4py
+
+# Simulation libraries (gympn installs compatible simpn/torch deps)
+gympn @ git+https://github.com/bpogroup/gympn.git
+
+

@@ -1,10 +1,13 @@
 
-import sys
 import copy
 import numpy as np
 import pandas as pd
-import random
-sys.path.append("C:/Users/20183272/OneDrive - TU Eindhoven/Documents/GitHub/gympn")
+import sys
+
+# If gympn is not installed in your environment:
+# 1) git clone https://github.com/bpogroup/gympn.git
+# 2) add your local path below, e.g. sys.path.append("C:/path/to/gympn")
+# sys.path.append("C:/path/to/gympn")
 
 import torch
 from gympn.networks import HeteroActor
