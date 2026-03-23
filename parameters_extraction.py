@@ -6,7 +6,7 @@ import pandas as pd
 
 
 if __name__ == "__main__":
-    log = pm4py.read_xes("./datasets/BPI_Challenge_2012.xes")
+    log = pm4py.read_xes("./data/BPI_Challenge_2012.xes")
 
     #check how many unique activities there are
     activities = log["concept:name"].unique()
